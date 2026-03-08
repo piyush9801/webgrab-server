@@ -38,10 +38,10 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 # Copy package files
-COPY package.json package-lock.json* ./
+COPY package.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install production dependencies
+RUN npm install --omit=dev
 
 # Copy built server code
 COPY dist/ ./dist/
