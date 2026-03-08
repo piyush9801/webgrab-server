@@ -1,0 +1,131 @@
+/**
+ * Capture Route - POST /api/capture-url
+ *
+ * Accepts a URL, renders it in headless Chrome, extracts the DOM tree,
+ * and returns a Figma-compatible JSON structure.
+ */
+
+import { Router, type Request, type Response } from 'express';
+import { renderUrl, type ViewportOption } from '../engine/renderer.js';
+import { convertDomToFigma } from '../converter/dom-to-figma.js';
+
+const router = Router();
+
+interface CaptureRequestBody {
+  url: string;
+  viewport?: 'desktop' | 'tablet' | 'mobile' | { width: number; height: number };
+}
+
+router.post('/capture-url', async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+
+  try {
+    const body = req.body as CaptureRequestBody;
+
+    // Validate URL
+    if (!body.url || typeof body.url !== 'string') {
+      res.status(400).json({
+        error: 'Missing or invalid "url" parameter',
+        details: 'Provide a valid URL string in the request body',
+      });
+      return;
+    }
+
+    // Normalize URL
+    let url = body.url.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://' + url;
+    }
+
+    // Validate URL format
+    try {
+      new URL(url);
+    } catch {
+      res.status(400).json({
+        error: 'Invalid URL format',
+        details: `"${body.url}" is not a valid URL`,
+      });
+      return;
+    }
+
+    // Resolve viewport
+    let viewport: ViewportOption = 'desktop';
+    if (body.viewport) {
+      if (typeof body.viewport === 'string') {
+        if (['desktop', 'tablet', 'mobile'].includes(body.viewport)) {
+          viewport = body.viewport as 'desktop' | 'tablet' | 'mobile';
+        }
+      } else if (
+        typeof body.viewport === 'object' &&
+        typeof body.viewport.width === 'number' &&
+        typeof body.viewport.height === 'number'
+      ) {
+        viewport = {
+          width: Math.max(320, Math.min(3840, body.viewport.width)),
+          height: Math.max(320, Math.min(3840, body.viewport.height)),
+        };
+      }
+    }
+
+    console.log(`[capture] Rendering URL: ${url} (viewport: ${JSON.stringify(viewport)})`);
+
+    // Render the URL
+    const renderResult = await renderUrl(url, viewport);
+
+    console.log(`[capture] DOM extracted in ${Date.now() - startTime}ms`);
+
+    // Determine server base URL from request
+    const protocol = req.protocol;
+    const host = req.get('host') || 'localhost:3500';
+    const serverBase = `${protocol}://${host}`;
+
+    // Convert DOM tree to Figma format
+    const figmaTree = convertDomToFigma(renderResult.domTree, {
+      baseUrl: url,
+      serverBase,
+    });
+
+    const elapsed = Date.now() - startTime;
+    console.log(`[capture] Conversion complete in ${elapsed}ms`);
+
+    res.json({
+      success: true,
+      data: {
+        figmaTree,
+        metadata: {
+          url: renderResult.url,
+          title: renderResult.title,
+          viewport: renderResult.viewport,
+          renderTimeMs: elapsed,
+        },
+      },
+    });
+  } catch (error: any) {
+    const elapsed = Date.now() - startTime;
+    console.error(`[capture] Error after ${elapsed}ms:`, error.message);
+
+    // Check for common errors
+    if (error.message?.includes('net::ERR_')) {
+      res.status(502).json({
+        error: 'Failed to load URL',
+        details: error.message,
+      });
+      return;
+    }
+
+    if (error.message?.includes('timeout') || error.message?.includes('Timeout')) {
+      res.status(504).json({
+        error: 'Page load timed out',
+        details: 'The page took too long to load (30s timeout)',
+      });
+      return;
+    }
+
+    res.status(500).json({
+      error: 'Capture failed',
+      details: error.message || 'Unknown error',
+    });
+  }
+});
+
+export default router;
